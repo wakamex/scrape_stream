@@ -24,7 +24,7 @@ def record_track(stream_url, output_filename, duration=None):
     """Record from stream to file. If duration is set, ffmpeg stops automatically."""
     command = ["ffmpeg", "-y", "-i", stream_url, "-vn", "-acodec", "copy"]
     if duration and duration > 0:
-        command.extend(["-t", str(int(duration) + 1)])  # +1s buffer for timing drift
+        command.extend(["-t", str(int(duration))])
     command.append(output_filename)
     return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
 
