@@ -162,21 +162,21 @@ def main():
             track_url = assets[0]["url"]
             track_name = f"{current_track['display_artist']} - {current_track['display_title']}"
             safe_name = sanitize_filename(track_name)
-            output_path = f"{MP3_DIR}/{safe_name}.mp4"
+            output_path = f"{MP3_DIR}/{safe_name}.mp3"
 
             # Skip if file already exists
             if os.path.exists(output_path):
-                print(f"File exists: {safe_name}.mp4")
+                print(f"File exists: {safe_name}.mp3")
                 downloaded_ids.add(current_track_id)
                 continue
 
             print(f"\nDownloading: {track_name}")
 
             # Download to temp file first
-            temp_path = f"{MP3_DIR}/temp.mp4"
+            temp_path = f"{MP3_DIR}/temp.mp3"
             if download_track(track_url, temp_path, desc=safe_name[:50]):
                 shutil.move(temp_path, output_path)
-                print(f"Saved: {safe_name}.mp4")
+                print(f"Saved: {safe_name}.mp3")
                 downloaded_ids.add(current_track_id)
             else:
                 print(f"Failed to download: {track_name}")
