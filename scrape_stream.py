@@ -17,6 +17,7 @@ from tqdm import tqdm
 denv = dotenv.dotenv_values(".env")
 
 STREAM_URL: str = str(denv["STREAM_URL"])
+MP3_DIR: str = str(denv.get("MP3_DIR", "/mnt/raid5/mp3s"))
 
 
 # %%
@@ -89,15 +90,16 @@ def kill_process_and_children(p, name):
         os.killpg(os.getpgid(p.pid), signal.SIGKILL)
 
     # wait for file to be written
-    None if os.path.exists("/home/mihai/mp3s/temp.mp3") else print("Waiting for file to be written...", end="")
-    while not os.path.exists("/home/mihai/mp3s/temp.mp3"):
+    temp_file = f"{MP3_DIR}/temp.mp3"
+    None if os.path.exists(temp_file) else print("Waiting for file to be written...", end="")
+    while not os.path.exists(temp_file):
         print(".", end="")
         time.sleep(0.1)
     # copy file to new location, trusting everything is ready
-    output_filename = f"/home/mihai/mp3s/{name}.mp3"
-    print(f"\nMoving file from /home/mihai/mp3s/temp.mp3 to {output_filename}...")
-    shutil.move("/home/mihai/mp3s/temp.mp3", output_filename)
-    print(f"{os.path.exists('/home/mihai/mp3s/temp.mp3')=}")
+    output_filename = f"{MP3_DIR}/{name}.mp3"
+    print(f"\nMoving file from {temp_file} to {output_filename}...")
+    shutil.move(temp_file, output_filename)
+    print(f"{os.path.exists(temp_file)=}")
     print(f"{os.path.exists(output_filename)=}")
 
 # %%
@@ -114,7 +116,7 @@ def main(channel: str):
             kill_process_and_children(p, name)
 
         print("Starting new recording...")
-        p = record_track(STREAM_URL, "/home/mihai/mp3s/temp.mp3")
+        p = record_track(STREAM_URL, f"{MP3_DIR}/temp.mp3")
         time_since_track_end = (datetime.datetime.now(datetime.timezone.utc) - end_time).total_seconds()
 
         # wait until 10s into the track to get the new track info
