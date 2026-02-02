@@ -170,6 +170,12 @@ def main():
                 downloaded_ids.add(current_track_id)
                 continue
 
+            # Calculate when track ends
+            start_time_str = currently_playing["track"]["start_time"]
+            duration = currently_playing["track"]["duration"]
+            start_time = datetime.datetime.fromisoformat(start_time_str)
+            end_time = start_time + datetime.timedelta(seconds=duration)
+
             print(f"\nDownloading: {track_name}")
 
             # Download to temp file first
@@ -183,8 +189,12 @@ def main():
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
 
-            # Brief pause before checking for next track
-            time.sleep(2)
+            # Wait until track ends
+            now = datetime.datetime.now(datetime.timezone.utc)
+            time_left = (end_time - now).total_seconds()
+            if time_left > 0:
+                print(f"Waiting {time_left:.0f}s for track to end...")
+                time.sleep(time_left + 1)  # +1s buffer
 
         except KeyboardInterrupt:
             print("\nStopping...")
