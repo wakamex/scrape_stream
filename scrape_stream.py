@@ -17,7 +17,7 @@ DI_PASSWORD: str = str(denv.get("DI_PASSWORD", ""))
 
 
 def login() -> str:
-    """Login to DI.FM and return audio token."""
+    """Login to DI.FM and return API key."""
     if not DI_USERNAME or not DI_PASSWORD:
         raise Exception("DI_USERNAME and DI_PASSWORD required in .env")
 
@@ -29,11 +29,11 @@ def login() -> str:
         raise Exception(f"Login failed: {response.status_code} {response.text}")
 
     data = response.json()
-    listen_key = data.get("listen_key")
-    if not listen_key:
-        raise Exception(f"No listen_key in response: {data}")
+    api_key = data.get("api_key")
+    if not api_key:
+        raise Exception(f"No api_key in response: {data}")
 
-    return listen_key
+    return api_key
 
 
 def get_channel_id(channel_key: str) -> int:
@@ -49,10 +49,10 @@ def get_channel_id(channel_key: str) -> int:
     raise Exception(f"Channel not found: {channel_key}")
 
 
-def get_routine(channel_id: int, audio_token: str):
+def get_routine(channel_id: int, api_key: str):
     """Get current routine (playlist) for a channel."""
-    url = f"https://api.audioaddict.com/v1/di/routines/channel/{channel_id}?audio_token={audio_token}"
-    response = requests.get(url)
+    url = f"https://api.audioaddict.com/v1/di/routines/channel/{channel_id}?tune_in=true"
+    response = requests.get(url, headers={"X-Api-Key": api_key})
     if response.status_code != 200:
         raise Exception(f"Failed to get routine: {response.status_code}")
     return response.json()
@@ -102,8 +102,8 @@ def main():
     os.makedirs(MP3_DIR, exist_ok=True)
 
     print("Logging in to DI.FM...")
-    audio_token = login()
-    print(f"Got audio token: {audio_token[:8]}...")
+    api_key = login()
+    print(f"Got API key: {api_key[:8]}...")
 
     print(f"Getting channel ID for {CHANNEL}...")
     channel_id = get_channel_id(CHANNEL)
@@ -114,7 +114,7 @@ def main():
     while True:
         try:
             # Get current routine (includes track content URLs)
-            routine = get_routine(channel_id, audio_token)
+            routine = get_routine(channel_id, api_key)
 
             # Get currently playing to know which track is active
             currently_playing = get_currently_playing(channel_id)
