@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "scrape-stream"
 version = "0.1.0"
@@ -13,3 +17,6 @@ dependencies = [
 
 [project.scripts]
 scrape = "scrape_stream:main"
+
+[tool.uv]
+package = true
