@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -77,6 +78,7 @@ def scan_library() -> dict[str, list[dict]]:
                 "title": title,
                 "rating": rating,
                 "path": f"{channel}/{mp3_file.name}",
+                "category": channel,
             })
         if tracks:
             result[channel] = tracks
@@ -95,6 +97,23 @@ def set_rating(mp3_path: Path, rating: int):
     tags.save(mp3_path)
 
 
+def pick_stream_track() -> dict | None:
+    """Pick a random track weighted by rating. Unrated tracks use category average."""
+    all_tracks = []
+    for channel, tracks in library.items():
+        rated = [t["rating"] for t in tracks if t["rating"] > 0]
+        cat_avg = sum(rated) / len(rated) if rated else 2.5
+        for t in tracks:
+            weight = t["rating"] if t["rating"] > 0 else cat_avg
+            all_tracks.append((t, channel, weight))
+    if not all_tracks:
+        return None
+    tracks, channels, weights = zip(*all_tracks)
+    choice_idx = random.choices(range(len(all_tracks)), weights=weights, k=1)[0]
+    t = tracks[choice_idx]
+    return {**t, "category": channels[choice_idx]}
+
+
 def generate_html() -> str:
     return """<!DOCTYPE html>
 <html lang="en">
@@ -110,42 +129,58 @@ def generate_html() -> str:
             padding: 20px;
             padding-bottom: 120px;
             line-height: 1.6;
-            color: #333;
+            color: #D3D3D3;
+            background: #303030;
         }
-        h1 { margin-bottom: 8px; }
-        .tagline { color: #666; margin-top: 0; }
-        nav { border-bottom: 1px solid #eee; margin-bottom: 16px; display: flex; flex-wrap: wrap; gap: 0; }
+        h1 { margin-bottom: 8px; color: white; }
+        .tagline { color: #737373; margin-top: 0; }
+        .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+        .toolbar .tagline { margin: 0; }
+        .stream-btn {
+            background: #ff4500; color: white; border: none; padding: 6px 16px;
+            font-size: 0.9em; cursor: pointer; font-family: inherit;
+        }
+        .stream-btn:hover { background: #e63e00; }
+        .stream-btn.active { background: #1f77b4; }
+        .stream-btn.active:hover { background: #1a6a9e; }
+        nav { border-bottom: 1px solid #737373; margin-bottom: 16px; display: flex; flex-wrap: wrap; gap: 0; }
         nav a {
-            color: #555; text-decoration: none; padding: 8px 14px;
+            color: #737373; text-decoration: none; padding: 8px 14px;
             border-bottom: 2px solid transparent; font-size: 0.9em;
         }
-        nav a:hover { color: #333; }
-        nav a.active { color: #0066cc; border-bottom-color: #0066cc; }
+        nav a:hover { color: #D3D3D3; }
+        nav a.active { color: #ff4500; border-bottom-color: #ff4500; }
         table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.9em; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background: #f5f5f5; }
-        tr:hover { background: #f9f9f9; cursor: pointer; }
-        tr.playing { background: #f0f7ff; }
+        th, td { border: 1px solid #404040; padding: 8px; text-align: left; }
+        th { background: #252525; color: #D3D3D3; }
+        tr:hover { background: #3a3a3a; cursor: pointer; }
+        tr.playing { background: #1a2a3a; }
         .stars { white-space: nowrap; cursor: pointer; font-size: 1.1em; }
-        .stars span { color: #ccc; }
-        .stars span.on { color: #e6a817; }
-        .stars span:hover, .stars span.hover { color: #e6a817; }
+        .stars span { color: #555; }
+        .stars span.on { color: #ff4500; }
+        .stars span:hover, .stars span.hover { color: #ff4500; }
+        .cat { color: #1f77b4; font-size: 0.85em; }
         #player {
             position: fixed; bottom: 0; left: 0; right: 0;
-            background: #f5f5f5; border-top: 1px solid #eee;
+            background: #252525; border-top: 1px solid #737373;
             padding: 12px 20px; display: none;
             align-items: center; gap: 16px;
         }
         #player .info { flex: 0 0 auto; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9em; }
-        #player .info .artist { color: #666; font-size: 0.85em; }
+        #player .info .title { color: white; }
+        #player .info .artist { color: #737373; font-size: 0.85em; }
+        #player .info .cat { margin-top: 1px; }
         #player audio { flex: 1; min-width: 200px; }
         #player .stars { flex: 0 0 auto; }
-        .num { color: #888; width: 40px; }
+        .num { color: #737373; width: 40px; }
     </style>
 </head>
 <body>
     <h1>Music Library</h1>
-    <p class="tagline" id="subtitle">Loading...</p>
+    <div class="toolbar">
+        <p class="tagline" id="subtitle">Loading...</p>
+        <button class="stream-btn" id="stream-btn" onclick="toggleStream()">Stream</button>
+    </div>
     <nav id="channels"></nav>
     <table id="tracklist"><tbody></tbody></table>
 
@@ -153,6 +188,7 @@ def generate_html() -> str:
         <div class="info">
             <div class="title" id="p-title"></div>
             <div class="artist" id="p-artist"></div>
+            <div class="cat" id="p-cat"></div>
         </div>
         <audio id="audio" controls preload="none"></audio>
         <div class="stars" id="p-stars"></div>
@@ -163,6 +199,7 @@ def generate_html() -> str:
     let currentChannel = null;
     let currentIdx = -1;
     let tracks = [];
+    let streaming = false;
 
     async function init() {
         const resp = await fetch('/api/tracks');
@@ -180,7 +217,7 @@ def generate_html() -> str:
             const a = document.createElement('a');
             a.href = '#';
             a.textContent = name + ' (' + channels[name].length + ')';
-            a.onclick = e => { e.preventDefault(); showChannel(name); };
+            a.onclick = e => { e.preventDefault(); stopStream(); showChannel(name); };
             nav.appendChild(a);
         });
 
@@ -193,18 +230,26 @@ def generate_html() -> str:
         document.querySelectorAll('nav a').forEach(a => {
             a.classList.toggle('active', a.textContent.startsWith(name + ' '));
         });
+        renderTable();
+    }
+
+    function renderTable() {
         const tbody = document.querySelector('#tracklist tbody');
         tbody.innerHTML = '';
+        const showCat = currentChannel === null;
         const head = document.createElement('tr');
-        head.innerHTML = '<th class="num">#</th><th>Artist</th><th>Title</th><th>Rating</th>';
+        head.innerHTML = '<th class="num">#</th><th>Artist</th><th>Title</th>' +
+            (showCat ? '<th>Category</th>' : '') + '<th>Rating</th>';
         tbody.appendChild(head);
         tracks.forEach((t, i) => {
             const tr = document.createElement('tr');
             tr.dataset.idx = i;
             tr.onclick = () => play(i);
+            if (i === currentIdx) tr.classList.add('playing');
             tr.innerHTML = '<td class="num">' + (i + 1) + '</td>' +
                 '<td>' + esc(t.artist) + '</td>' +
                 '<td>' + esc(t.title) + '</td>' +
+                (showCat ? '<td class="cat">' + esc(t.category || '') + '</td>' : '') +
                 '<td>' + starsHtml(t.rating, i) + '</td>';
             tbody.appendChild(tr);
         });
@@ -235,7 +280,6 @@ def generate_html() -> str:
     async function rate(idx, rating) {
         const t = tracks[idx];
         const prev = t.rating;
-        // Toggle off if clicking same rating
         const newRating = (prev === rating) ? 0 : rating;
         const resp = await fetch('/api/rate', {
             method: 'POST',
@@ -244,10 +288,13 @@ def generate_html() -> str:
         });
         if (resp.ok) {
             t.rating = newRating;
-            // Update table stars
+            // Also update the master channels data
+            for (const ch of Object.values(channels)) {
+                const found = ch.find(x => x.path === t.path);
+                if (found) { found.rating = newRating; break; }
+            }
             const row = document.querySelector('tr[data-idx="' + idx + '"] .stars');
             if (row) row.outerHTML = starsHtml(newRating, idx);
-            // Update player stars if this is the current track
             if (idx === currentIdx) renderPlayerStars(newRating);
         }
     }
@@ -260,6 +307,7 @@ def generate_html() -> str:
         audio.play();
         document.getElementById('p-title').textContent = t.title;
         document.getElementById('p-artist').textContent = t.artist;
+        document.getElementById('p-cat').textContent = t.category || currentChannel || '';
         document.getElementById('player').style.display = 'flex';
         renderPlayerStars(t.rating);
         document.querySelectorAll('tr.playing').forEach(r => r.classList.remove('playing'));
@@ -272,8 +320,44 @@ def generate_html() -> str:
         el.innerHTML = starsHtml(rating, currentIdx);
     }
 
+    // Stream mode
+    function toggleStream() {
+        if (streaming) { stopStream(); return; }
+        streaming = true;
+        const btn = document.getElementById('stream-btn');
+        btn.textContent = 'Stop';
+        btn.classList.add('active');
+        document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+        currentChannel = null;
+        tracks = [];
+        streamNext();
+    }
+
+    function stopStream() {
+        streaming = false;
+        const btn = document.getElementById('stream-btn');
+        btn.textContent = 'Stream';
+        btn.classList.remove('active');
+    }
+
+    async function streamNext() {
+        if (!streaming) return;
+        const resp = await fetch('/api/stream');
+        const t = await resp.json();
+        if (!t || t.error) { stopStream(); return; }
+        // Add to stream playlist
+        tracks.push(t);
+        currentIdx = tracks.length - 1;
+        renderTable();
+        play(currentIdx);
+    }
+
     document.getElementById('audio').addEventListener('ended', () => {
-        if (currentIdx < tracks.length - 1) play(currentIdx + 1);
+        if (streaming) {
+            streamNext();
+        } else if (currentIdx < tracks.length - 1) {
+            play(currentIdx + 1);
+        }
     });
 
     function esc(s) {
@@ -314,7 +398,16 @@ class MusicHandler(BaseHTTPRequestHandler):
             self.wfile.write(html)
 
         elif path == "/api/tracks":
+            global library
+            library = scan_library()
             self.send_json(library)
+
+        elif path == "/api/stream":
+            track = pick_stream_track()
+            if track:
+                self.send_json(track)
+            else:
+                self.send_json({"error": "no tracks"}, 404)
 
         elif path.startswith("/mp3/"):
             rel = urllib.parse.unquote(path[5:])
