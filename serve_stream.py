@@ -1,18 +1,19 @@
 import json
 import os
 import random
+import sqlite3
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import dotenv
-from mutagen.id3 import ID3, TXXX
-from mutagen.mp3 import MP3
+from mutagen.id3 import ID3
 
 denv = dotenv.dotenv_values(".env")
 MP3_DIR = Path(denv.get("MP3_DIR", "/mnt/raid5/mp3s"))
 HOST = denv.get("SERVE_HOST", "0.0.0.0")
 PORT = int(denv.get("SERVE_PORT", "8000"))
+DB_PATH = MP3_DIR / "library.db"
 
 # Global library cache: {channel: [track, ...]}
 library: dict[str, list[dict]] = {}
@@ -25,14 +26,50 @@ def load_favorites() -> list[str]:
     return []
 
 
-def get_rating(tags: ID3) -> int:
-    txxx = tags.getall("TXXX:RATING")
-    if txxx and txxx[0].text:
+def init_db():
+    db = sqlite3.connect(DB_PATH)
+    db.execute("""CREATE TABLE IF NOT EXISTS tracks (
+        path TEXT PRIMARY KEY,
+        artist TEXT,
+        title TEXT,
+        category TEXT,
+        rating INTEGER DEFAULT 0,
+        mtime REAL
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_category ON tracks(category)")
+    db.commit()
+    return db
+
+
+def import_id3_ratings(db: sqlite3.Connection):
+    """One-time import: read TXXX:RATING from any MP3 that has one and store in DB."""
+    cursor = db.execute("SELECT path, rating FROM tracks WHERE rating > 0")
+    already_rated = {row[0] for row in cursor.fetchall()}
+
+    cursor = db.execute("SELECT path FROM tracks WHERE rating = 0")
+    unrated_paths = [row[0] for row in cursor.fetchall()]
+
+    imported = 0
+    for rel_path in unrated_paths:
+        if rel_path in already_rated:
+            continue
+        full_path = MP3_DIR / rel_path
+        if not full_path.exists():
+            continue
         try:
-            return int(txxx[0].text[0])
-        except (ValueError, IndexError):
+            tags = ID3(full_path)
+            txxx = tags.getall("TXXX:RATING")
+            if txxx and txxx[0].text:
+                rating = int(txxx[0].text[0])
+                if 1 <= rating <= 5:
+                    db.execute("UPDATE tracks SET rating = ? WHERE path = ?", (rating, rel_path))
+                    imported += 1
+        except Exception:
             pass
-    return 0
+
+    if imported:
+        db.commit()
+        print(f"Imported {imported} ratings from ID3 tags")
 
 
 def scan_library() -> dict[str, list[dict]]:
@@ -42,59 +79,91 @@ def scan_library() -> dict[str, list[dict]]:
     if not MP3_DIR.is_dir():
         return result
 
+    db = init_db()
+
+    # Load existing mtime cache from DB
+    cursor = db.execute("SELECT path, mtime FROM tracks")
+    cached_mtimes = {row[0]: row[1] for row in cursor.fetchall()}
+
     # Discover all channel directories
     channels = []
     for entry in sorted(MP3_DIR.iterdir()):
         if entry.is_dir():
             channels.append(entry.name)
 
-    # Order: favorites first, then the rest
     ordered = [c for c in favorites if c in channels]
     ordered += [c for c in channels if c not in ordered]
 
+    # Scan filesystem and upsert new/modified files
+    all_current_paths = set()
     for channel in ordered:
         channel_dir = MP3_DIR / channel
-        tracks = []
         for mp3_file in sorted(channel_dir.glob("*.mp3")):
             if mp3_file.name == "temp.mp3":
                 continue
+            rel_path = f"{channel}/{mp3_file.name}"
+            all_current_paths.add(rel_path)
+            mtime = mp3_file.stat().st_mtime
+
+            if rel_path in cached_mtimes and cached_mtimes[rel_path] == mtime:
+                continue
+
+            # New or modified file — read ID3 tags
             artist = ""
             title = mp3_file.stem
-            rating = 0
             try:
                 tags = ID3(mp3_file)
                 if "TPE1" in tags:
                     artist = str(tags["TPE1"])
                 if "TIT2" in tags:
                     title = str(tags["TIT2"])
-                rating = get_rating(tags)
             except Exception:
-                # Fall back to filename parsing
                 parts = mp3_file.stem.split(" - ", 1)
                 if len(parts) == 2:
                     artist, title = parts
-            tracks.append({
-                "artist": artist,
-                "title": title,
-                "rating": rating,
-                "path": f"{channel}/{mp3_file.name}",
-                "category": channel,
-            })
+
+            db.execute(
+                """INSERT INTO tracks (path, artist, title, category, mtime)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(path) DO UPDATE SET
+                       artist=excluded.artist, title=excluded.title,
+                       category=excluded.category, mtime=excluded.mtime""",
+                (rel_path, artist, title, channel, mtime),
+            )
+
+    # Remove deleted files from DB
+    if cached_mtimes:
+        deleted = set(cached_mtimes.keys()) - all_current_paths
+        if deleted:
+            db.executemany("DELETE FROM tracks WHERE path = ?", [(p,) for p in deleted])
+
+    db.commit()
+
+    # Import any existing ID3 ratings on first run
+    import_id3_ratings(db)
+
+    # Build library from DB
+    for channel in ordered:
+        cursor = db.execute(
+            "SELECT artist, title, rating, path, category FROM tracks WHERE category = ? ORDER BY artist, title",
+            (channel,),
+        )
+        tracks = [
+            {"artist": row[0], "title": row[1], "rating": row[2], "path": row[3], "category": row[4]}
+            for row in cursor.fetchall()
+        ]
         if tracks:
             result[channel] = tracks
 
+    db.close()
     return result
 
 
-def set_rating(mp3_path: Path, rating: int):
-    try:
-        tags = ID3(mp3_path)
-    except Exception:
-        tags = ID3()
-    tags.delall("TXXX:RATING")
-    if rating > 0:
-        tags.add(TXXX(encoding=3, desc="RATING", text=[str(rating)]))
-    tags.save(mp3_path)
+def set_rating(rel_path: str, rating: int):
+    db = sqlite3.connect(DB_PATH)
+    db.execute("UPDATE tracks SET rating = ? WHERE path = ?", (rating, rel_path))
+    db.commit()
+    db.close()
 
 
 def pick_stream_track() -> dict | None:
@@ -288,7 +357,6 @@ def generate_html() -> str:
         });
         if (resp.ok) {
             t.rating = newRating;
-            // Also update the master channels data
             for (const ch of Object.values(channels)) {
                 const found = ch.find(x => x.path === t.path);
                 if (found) { found.rating = newRating; break; }
@@ -345,9 +413,8 @@ def generate_html() -> str:
         const resp = await fetch('/api/stream');
         const t = await resp.json();
         if (!t || t.error) { stopStream(); return; }
-        // Add to stream playlist
-        tracks.push(t);
-        currentIdx = tracks.length - 1;
+        tracks.unshift(t);
+        currentIdx = 0;
         renderTable();
         play(currentIdx);
     }
@@ -374,7 +441,6 @@ def generate_html() -> str:
 
 class MusicHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
-        # Suppress request logging noise
         pass
 
     def send_json(self, data, status=200):
@@ -437,9 +503,9 @@ class MusicHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "invalid path"}, 400)
                     return
 
-                set_rating(full_path, rating)
+                set_rating(rel_path, rating)
 
-                # Update cache
+                # Update in-memory cache
                 for channel_tracks in library.values():
                     for t in channel_tracks:
                         if t["path"] == rel_path:
@@ -462,7 +528,6 @@ class MusicHandler(BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
 
         if range_header:
-            # Parse "bytes=START-END"
             range_spec = range_header.replace("bytes=", "")
             parts = range_spec.split("-")
             start = int(parts[0]) if parts[0] else 0
