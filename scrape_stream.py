@@ -99,7 +99,8 @@ def sanitize_filename(name: str) -> str:
 
 
 def main():
-    os.makedirs(MP3_DIR, exist_ok=True)
+    channel_dir = os.path.join(MP3_DIR, CHANNEL)
+    os.makedirs(channel_dir, exist_ok=True)
 
     print("Logging in to DI.FM...")
     api_key = login()
@@ -162,7 +163,7 @@ def main():
             track_url = assets[0]["url"]
             track_name = f"{current_track['display_artist']} - {current_track['display_title']}"
             safe_name = sanitize_filename(track_name)
-            output_path = f"{MP3_DIR}/{safe_name}.mp3"
+            output_path = f"{channel_dir}/{safe_name}.mp3"
 
             # Skip if file already exists
             if os.path.exists(output_path):
@@ -179,7 +180,7 @@ def main():
             print(f"\nDownloading: {track_name}")
 
             # Download to temp file first
-            temp_path = f"{MP3_DIR}/temp.mp3"
+            temp_path = f"{channel_dir}/temp.mp3"
             if download_track(track_url, temp_path, desc=safe_name[:50]):
                 shutil.move(temp_path, output_path)
                 print(f"Saved: {safe_name}.mp3")
