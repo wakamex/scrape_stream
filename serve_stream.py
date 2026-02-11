@@ -159,6 +159,48 @@ def scan_library() -> dict[str, list[dict]]:
     return result
 
 
+def load_library_from_db() -> dict[str, list[dict]]:
+    favorites = load_favorites()
+    result: dict[str, list[dict]] = {}
+
+    if not DB_PATH.exists():
+        return result
+
+    db = init_db()
+    cursor = db.execute("SELECT artist, title, rating, path, category FROM tracks ORDER BY category, artist, title")
+
+    by_channel: dict[str, list[dict]] = {}
+    for row in cursor.fetchall():
+        track = {"artist": row[0], "title": row[1], "rating": row[2], "path": row[3], "category": row[4]}
+        by_channel.setdefault(row[4], []).append(track)
+
+    channels = sorted(by_channel.keys())
+    ordered = [c for c in favorites if c in by_channel]
+    ordered += [c for c in channels if c not in ordered]
+
+    for channel in ordered:
+        result[channel] = by_channel[channel]
+
+    db.close()
+    return result
+
+
+def refresh_library_cache(force_scan: bool = False) -> str:
+    """Refresh in-memory library; returns 'db' or 'scan' based on source."""
+    global library
+
+    if force_scan:
+        library = scan_library()
+        return "scan"
+
+    library = load_library_from_db()
+    if library:
+        return "db"
+
+    library = scan_library()
+    return "scan"
+
+
 def set_rating(rel_path: str, rating: int):
     db = sqlite3.connect(DB_PATH)
     db.execute("UPDATE tracks SET rating = ? WHERE path = ?", (rating, rel_path))
@@ -465,7 +507,12 @@ class MusicHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/tracks":
             global library
-            library = scan_library()
+            query = urllib.parse.parse_qs(parsed.query)
+            force_scan = query.get("rescan", ["0"])[0].lower() in {"1", "true", "yes"}
+            if force_scan:
+                refresh_library_cache(force_scan=True)
+            elif not library:
+                refresh_library_cache(force_scan=False)
             self.send_json(library)
 
         elif path == "/api/stream":
@@ -565,10 +612,12 @@ class MusicHandler(BaseHTTPRequestHandler):
 def main():
     global library
 
-    print(f"Scanning library at {MP3_DIR}...")
-    library = scan_library()
+    source = refresh_library_cache(force_scan=False)
     total = sum(len(tracks) for tracks in library.values())
-    print(f"Found {total} tracks in {len(library)} channels")
+    if source == "db":
+        print(f"Loaded {total} tracks in {len(library)} channels from {DB_PATH}")
+    else:
+        print(f"Scanned library at {MP3_DIR}: {total} tracks in {len(library)} channels")
 
     server = ThreadingHTTPServer((HOST, PORT), MusicHandler)
     print(f"Serving at http://{HOST}:{PORT}")
